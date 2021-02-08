@@ -1,0 +1,527 @@
+---
+title: "STA223_YL_project1_cleaned"
+author: "YL"
+date: "2/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# libraries
+library(dplyr)
+library(RColorBrewer)
+library(MASS)
+library(nnet)
+library(tidyr)
+library(lawstat)
+library(RColorBrewer)
+```
+
+```{r}
+# Data pre-processing
+
+# import data
+ctg = read.csv("ctg_analysis.csv",header=TRUE)
+names(ctg)
+# identify categorical variables
+ctg$Tendency <- as.factor(ctg$Tendency); ctg$NSP <- as.factor(ctg$NSP)
+summary(ctg$Tendency)
+# remove all quantitative variables describing the histogram due to high multicollinearity
+ctg.nohist = ctg[,-c(12:20)]
+rxx_inv = solve(cor(ctg.nohist[,-c(12,13)]))
+VIF = diag(rxx_inv) # no multicollinearity left
+
+# Categorize DS, FM
+DS_binary = rep(0,n); FM_binary = rep(0,n)
+DS_binary[which(ctg$DS!=0)]=1
+FM_binary[which(ctg$FM>0.00138)]=1 
+DS_binary = as.factor(DS_binary); FM_binary=as.factor(FM_binary)
+ctg.new = cbind(ctg.nohist[,-c(3,6)],DS_binary,FM_binary)
+# Normalize continuous variables by min, max
+normalize <- function(x) {
+  return ((x-min(x))/(max(x)-min(x)))
+}
+## ctg.new.nlz
+ctg.new.nlz = cbind(as.data.frame(sapply(ctg.new[,1:9],normalize)),ctg.new[,10:13])
+
+##ctg.nohist.nlz
+ctg.nohist.nlz = cbind(as.data.frame(sapply(ctg.nohist[,1:11],normalize)),ctg.nohist[,12:13])
+```
+
+```{r}
+# Exploratory data analysis
+# pie chart of three NSP categories
+n = dim(ctg)[1]
+pct = round(100*table(ctg$NSP)/n)
+lbls = c("Normal","Suspect","Pathologic")
+lab = paste0(pct,"%")
+lab = paste(lbls, lab, sep=':')
+pie(table(ctg$NSP),labels = lab, col = brewer.pal(n=3,name = 'Accent'), main = "Pie chart for fetal state classes")
+# summary statisits (ctg.new, not normalized)
+# For table (report)
+median_cont = aggregate(ctg.new[,1:9],by=list(NSP=ctg.new.nlz$NSP),FUN = median)
+min_cont = aggregate(ctg.new[,1:9],by=list(NSP=ctg.new.nlz$NSP),FUN = min)
+max_cont = aggregate(ctg.new[,1:9],by=list(NSP=ctg.new.nlz$NSP),FUN = max)
+summary_cont=sapply(2:10, function(x) {
+  paste0(median_cont[,x],"(",min_cont[,x],"-",max_cont[,x],")")
+})
+write.csv(summary_cont,"summary_cont.csv")
+pct_cat_nsp1 = sapply(ctg.new[which(ctg.new$NSP=="1"),c(10,12,13)],table)
+pct_cat_nsp2 = sapply(ctg.new[which(ctg.new$NSP=="2"),c(10,12,13)],table)
+pct_cat_nsp3 = sapply(ctg.new[which(ctg.new$NSP=="3"),c(10,12,13)],table)
+# For poster (graphs)
+par(mfrow=c(3,3))
+invisible(lapply(1:9,function(x) boxplot(ctg.new[,x]~ctg.new$NSP,xlab = "NSP",ylab = names(ctg.new)[x],,col = brewer.pal(n=3,name = 'Accent'))))
+par(mfrow=c(1,1))
+
+n_nsp1 = length(which(ctg.new$NSP=="1")); n_nsp2 = length(which(ctg.new$NSP=="2")); n_nsp3 = length(which(ctg.new$NSP=="3"));
+n_nsp = c(n_nsp1,n_nsp2,n_nsp3); names(n_nsp) = c("1","2","3")
+
+# pie charts for nsp1
+
+piechart = function(x,class){
+  pct = round(100*x/n_nsp[class], digits = 1)
+  lbls = names(x)
+  lab = paste0(pct,"%")
+  lab = paste(lbls, lab, sep=':')
+  pie(x,labels = lab, col = brewer.pal(n=3,name = 'Accent'), main = paste("NSP class",names(n_nsp)[class]))
+}
+
+jpeg("nsp1_tendency.jpg")
+piechart(pct_cat_nsp1[["Tendency"]],1)
+jpeg("nsp1_DS.jpg")
+piechart(pct_cat_nsp1[["DS_binary"]],1)
+jpeg("nsp1_FM.jpg")
+piechart(pct_cat_nsp1[["FM_binary"]],1)
+
+jpeg("nsp2_tendency.jpg")
+piechart(pct_cat_nsp2[["Tendency"]],2)
+jpeg("nsp2_DS.jpg")
+piechart(pct_cat_nsp2[["DS_binary"]],2)
+jpeg("nsp2_FM.jpg")
+piechart(pct_cat_nsp2[["FM_binary"]],2)
+
+jpeg("nsp3_tendency.jpg")
+piechart(pct_cat_nsp3[["Tendency"]],3)
+jpeg("nsp3_DS.jpg")
+piechart(pct_cat_nsp3[["DS_binary"]],3)
+jpeg("nsp3_FM.jpg")
+piechart(pct_cat_nsp3[["FM_binary"]],3)
+```
+
+```{r}
+# proportional odds model: ctg.new.nlz
+
+# Preliminary model fitting
+new.full = polr(NSP~.,data=ctg.new.nlz, method = "logistic",Hess = TRUE)
+new.null = polr(NSP~1,data=ctg.new.nlz, method = "logistic",Hess = TRUE)
+
+# model diagnostics: full model
+
+# n by M matrix of predicted prob:
+new.full_prd_prob = fitted(new.full)
+# vector of predicted labels:
+new.full_prd_labl = predict(new.full)
+# proportion of agreement with true class
+new.full_compare = data.frame(new.full_prd_labl, ctg$NSP)
+new.full_pa = length(which(new.full_compare$new.full_prd_labl==new.full_compare$ctg.NSP))/n
+
+# pearson's residuals
+obslabel = matrix(0,nrow=n,ncol=3)
+obslabel[which(ctg.nohist$NSP=="1"),1] <-1
+obslabel[which(ctg.nohist$NSP=="2"),2]<-1
+obslabel[which(ctg.nohist$NSP=="3"),3]<-1
+
+resplot_fitted = matrix(0,n,2)
+resplot_fitted <- sapply(1:(ncol(obslabel)-1), function(m) {
+  resplot_fitted[,m] <- rowSums(as.matrix(new.full_prd_prob[seq_len(n),1:m]))
+})
+
+resP.new.full <- sapply(1:(ncol(obslabel)-1), function(m) {
+  obs_m <- rowSums(as.matrix(obslabel[,1:m]))
+  fit_m = resplot_fitted[,m]
+  (obs_m - fit_m) / sqrt(fit_m * (1 - fit_m))
+})
+
+new.full_chiP = sapply(1:2,function(m){
+  chiP=sum((resP.new.full[,m])^2)
+  pchisq(chiP,n-length(coef(new.full))-1,lower.tail = FALSE)
+})                                         ## p=length(coef(polr.new.aic)+1
+
+# residual plots
+# resP vs. fitted
+par(mfrow = c(1,2))
+plot(resplot_fitted[,1], resP.new.full[,1], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(resplot_fitted[,1], resP.new.full[,1], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(resplot_fitted[,2], resP.new.full[,2], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(resplot_fitted[,2], resP.new.full[,2], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+par(mfrow = c(1,1))
+
+# runs test
+par(mfrow = c(1,2))
+runs.test(y = resP.new.full[,1], plot.it = TRUE)
+title(main='Pearson Residual Runs Test')
+runs.test(y = resP.new.full[,2], plot.it = TRUE)
+title(main='Pearson Residual Runs Test')
+par(mfrow = c(1,1))
+```
+
+```{r}
+# exclude # 1493 & 1489 and rerun the full model
+ctg.new.nlz2 = ctg.new.nlz[-c(1489,1493),]
+# Preliminary model fitting
+new.full2 = polr(NSP~.,data=ctg.new.nlz2, method = "logistic",Hess = TRUE)
+new.null2 = polr(NSP~1,data=ctg.new.nlz2, method = "logistic",Hess = TRUE)
+
+# model diagnostics: 
+
+# n by M matrix of predicted prob:
+new.full2_prd_prob = fitted(new.full2)
+# vector of predicted labels:
+new.full2_prd_labl = predict(new.full2)
+# proportion of agreement with true class
+new.full2_compare = data.frame(new.full2_prd_labl, ctg.new.nlz2$NSP)
+new.full2_pa = length(which(new.full2_compare$new.full2_prd_labl==new.full2_compare$ctg.new.nlz2.NSP))/n
+
+# pearson's residuals
+n_adj = n-2
+obslabel2 = matrix(0,nrow=n_adj,ncol=3)
+obslabel2[which(ctg.new.nlz2$NSP=="1"),1] <-1
+obslabel2[which(ctg.new.nlz2$NSP=="2"),2]<-1
+obslabel2[which(ctg.new.nlz2$NSP=="3"),3]<-1
+
+resplot_fitted2 = matrix(0,n_adj,2)
+resplot_fitted2 <- sapply(1:(ncol(obslabel2)-1), function(m) {
+  resplot_fitted2[,m] <- rowSums(as.matrix(new.full2_prd_prob[seq_len(n_adj),1:m]))
+})
+
+resP.new.full2 <- sapply(1:(ncol(obslabel2)-1), function(m) {
+  obs_m <- rowSums(as.matrix(obslabel2[,1:m]))
+  fit_m = resplot_fitted2[,m]
+  (obs_m - fit_m) / sqrt(fit_m * (1 - fit_m))
+})
+
+new.full2_chiP = sapply(1:2,function(m){
+  chiP = sum((resP.new.full2[,m])^2)
+  pchisq(chiP,n_adj-length(coef(new.full2))-1,lower.tail = FALSE)
+})                                         ## p=length(coef(polr.new.aic)+1
+
+# residual plots
+# resP vs. fitted: some quadratic term left in the second logistic model
+par(mfrow = c(1,2))
+plot(resplot_fitted2[,1], resP.new.full2[,1], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(resplot_fitted2[,1], resP.new.full2[,1], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(resplot_fitted2[,2], resP.new.full2[,2], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(resplot_fitted2[,2], resP.new.full2[,2], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+par(mfrow = c(1,1))
+
+# residual vs. predictors
+for (i in c(1:4,6:9)){
+  plot(ctg.new.nlz2[,i],resP.new.full2[,1],xlab = names(ctg.new.nlz2)[i],ylab="Pearson residuals")
+lines(smooth.spline(ctg.new.nlz2[,i], resP.new.full2[,1], spar=0.5), col=2)
+abline(h=0, lty=2, col='grey')
+}
+
+for (i in c(1:4,6:9)){
+  plot(ctg.new.nlz2[,i],resP.new.full2[,2],xlab = names(ctg.new.nlz2)[i],ylab="Pearson residuals")
+lines(smooth.spline(ctg.new.nlz2[,i], resP.new.full2[,2], spar=0.5), col=2)
+abline(h=0, lty=2, col='grey')
+}
+
+plot(ctg.new.nlz2[,5],resP.new.full2[,1], xlab = names(ctg.new.nlz2)[5],ylab="Pearson residuals")
+abline(h=0, lty=2, col='grey')
+
+# runs test
+par(mfrow = c(1,2))
+runs.test(y = resP.new.full2[,1], plot.it = TRUE)
+title(main='Pearson Residual Runs Test')
+runs.test(y = resP.new.full2[,2], plot.it = TRUE)
+title(main='Pearson Residual Runs Test')
+par(mfrow = c(1,1))
+```
+--------------------------------------------------------------------------------------
+```{r}
+# baseline odds model: data=ctg.new.nlz
+bo.complete = multinom(NSP~.,data=ctg.new.nlz,Hess=TRUE)
+# pearson residuals function for bo model
+bo.resP = function(model,obslabel) {
+  prd_labl = predict(model)
+  prd_prob = fitted(model)
+  resP = sapply(2:ncol(obslabel), function(m) {
+  obs_m <- obslabel[rowSums(obslabel[,c(1,m)]) > 0, m]
+  fit_m <- prd_prob[rowSums(obslabel[,c(1,m)]) > 0,c(1,m)]
+  fit_m <- fit_m[,2] / rowSums(fit_m)
+  (obs_m - fit_m) / sqrt(fit_m * (1 - fit_m))
+})
+  return(resP)
+}
+# pearson's residuals
+bo.complete_resP = bo.resP(bo.complete,obslabel)
+bo.complete_chiP = sapply(1:2,function(m){
+  chiP = sum((bo.complete_resP[[m]])^2)
+  pchisq(chiP,n_adj-dim(coef(bo.complete))[2],lower.tail = FALSE)
+})  
+# proportion of agreement with true class
+bo.complete_prd_labl = predict(bo.complete)
+bo.complete_compare = data.frame(bo.complete_prd_labl, ctg.new.nlz$NSP)
+bo.complete_pa = length(which(bo.complete_compare$bo.complete_prd_labl==bo.complete_compare$ctg.new.nlz.NSP))/n
+
+# cooks distance plot: identify influential points (1489,1493)
+n_bo = sapply(2:ncol(obslabel), function(m){
+  which(rowSums(obslabel[,c(1,m)]) > 0)
+})
+
+obs_model1 = ctg.new.nlz[n_bo[[1]],]
+obs_model2 = ctg.new.nlz[n_bo[[2]],]
+
+X1 = as.matrix(cbind(rep(1,nrow(obs_model1)),obs_model1[,1:9],obs_model1$Tendency=="0",obs_model1$Tendency=="1",obs_model1$DS_binary=="1",obs_model1$FM_binary=="1"))
+hat1 = X1 %*% solve(t(X1) %*% X1) %*% t(X1)
+leverage1 = diag(hat1)
+names(leverage1) = seq(1,length(n_bo[[1]]),by=1)
+
+X2 = as.matrix(cbind(rep(1,nrow(obs_model2)),obs_model2[,1:9],obs_model2$Tendency=="0",obs_model2$Tendency=="1",obs_model2$DS_binary=="1",obs_model2$FM_binary=="1"))
+hat2 = X2 %*% solve(t(X2) %*% X2) %*% t(X2)
+leverage2 = diag(hat2)
+names(leverage2) = seq(1,length(n_bo[[2]]),by=1)
+
+leverage = list('1'=leverage1,'2'=leverage2)
+
+cooksd.bo = function(model,resP,leverage,n_bo) {
+  p = dim(coef(model))[2]
+  mse = sapply(1:length(resP), function(m) {
+    sum(resP[[m]]^2)/(length(n_bo[[m]])- p)
+  })
+  r = sapply(1:length(resP), function(m) {
+    resP[[m]]/sqrt(mse[[m]]*(1-leverage[[m]]))
+  })
+  cooks.dist = sapply(1:length(resP), function(m) {
+    r[[m]]^2/p*leverage[[m]]/(1-leverage[[m]])
+  })
+  sapply(1:length(resP), function(m) {
+    names(cooks.dist[[m]]) <- n_bo[[m]]
+  })
+  return(cooks.dist)
+}
+
+bo.complete_cooksd = cooksd.bo(bo.complete,bo.complete_resP,leverage,n_bo)
+
+# model 1: nsp1 vs. nsp2
+plot(names(leverage1), bo.complete_cooksd[[1]], xlab="Index", ylab = "Cook's distance",type="h")
+points(names(leverage1), bo.complete_cooksd[[1]], pch=16, cex=0.6)
+abline(h=4/(length(n_bo[[1]])-dim(coef(bo.complete))[2]),col=2,lwd=2,lty=2)
+susPts = sort(bo.complete_cooksd[[1]][which(bo.complete_cooksd[[1]]>4/(length(n_bo[[1]])-dim(coef(bo.complete))[2]))],decreasing=TRUE)[1:3]
+# model 2: nsp1 vs. nsp3
+plot(names(leverage2), bo.complete_cooksd[[2]], xlab="Index", ylab = "Cook's distance",type="h")
+points(names(leverage2), bo.complete_cooksd[[2]], pch=16, cex=0.6)
+abline(h=4/(length(n_bo[[2]])-dim(coef(bo.complete))[2]),col=2,lwd=2,lty=2)
+susPts2 = sort(bo.complete_cooksd[[2]][which(bo.complete_cooksd[[2]]>4/(length(n_bo[[2]])-dim(coef(bo.complete))[2]))],decreasing=TRUE)[1:3]
+```
+
+```{r}
+# baseline odds model: data=ctg.new.nlz2 (remove 1489,1493)
+bo.full = multinom(NSP~.,data=ctg.new.nlz2,Hess=TRUE)
+bo.null = multinom(NSP~1,data=ctg.new.nlz2,Hess=TRUE)
+# z values
+zval.bo.full <- coef(bo.full) / summary(bo.full)$standard.errors
+# two-sided p-values
+pval.bo.full <- 2 * pnorm(abs(zval.bo.full), lower.tail=FALSE)
+
+# proportion of agreement with true class
+bo.full_prd_labl = predict(bo.full)
+bo.full_compare = data.frame(bo.full_prd_labl, ctg.new.nlz2$NSP)
+bo.full_pa = length(which(bo.full_compare$bo.full_prd_labl==bo.full_compare$ctg.new.nlz2.NSP))/n
+
+# pearson residuals
+bo.full_resP = bo.resP(bo.full,obslabel2)
+bo.full_prd_prob = fitted(bo.full)
+bo.full.resplot_fitted  = list() 
+bo.full.resplot_fitted <- sapply(2:ncol(obslabel2), function(m) {
+  fit_m <- bo.full_prd_prob[rowSums(obslabel2[,c(1,m)]) > 0,c(1,m)]
+  fit_m <- fit_m[,2] / rowSums(fit_m)
+  bo.full.resplot_fitted<-fit_m
+})
+
+bo.full_chiP = sapply(1:2,function(m){
+  chiP = sum((bo.full_resP[[m]])^2)
+  pchisq(chiP,n_adj-dim(coef(bo.full))[2],lower.tail = FALSE)
+})     
+
+# residual plots
+par(mfrow = c(1,2))
+plot(bo.full.resplot_fitted[[1]], bo.full_resP[[1]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.full.resplot_fitted[[1]], bo.full_resP[[1]], spar=2.2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(bo.full.resplot_fitted[[2]], bo.full_resP[[2]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.full.resplot_fitted[[2]], bo.full_resP[[2]], spar=2.3), col=2)
+abline(h=0, lty=2, col='grey')
+par(mfrow = c(1,1))
+
+# runs test
+runs.test(y =  bo.full_resP[[1]], plot.it = FALSE, alternative = "two.sided")
+
+runs.test(y =  bo.full_resP[[2]], plot.it = FALSE, alternative = "two.sided")
+
+# cooks distance plot: identify influential points (1489,1493)
+n_bo2 = sapply(2:ncol(obslabel2), function(m){
+  which(rowSums(obslabel2[,c(1,m)]) > 0)
+})
+
+obs_model1_full= ctg.new.nlz2[n_bo2[[1]],]
+obs_model2_full = ctg.new.nlz2[n_bo2[[2]],]
+
+# not able to calculate hat matrix for X1_full because all values of DS_binary are zero after removing case #1489
+X1_full = as.matrix(cbind(rep(1,nrow(obs_model1_full)),obs_model1_full[,1:9],obs_model1_full$Tendency=="0",obs_model1_full$Tendency=="1",obs_model1_full$DS_binary=="1",obs_model1_full$FM_binary=="1"))
+
+
+
+X2_full = as.matrix(cbind(rep(1,nrow(obs_model2_full)),obs_model2_full[,1:9],obs_model2_full$Tendency=="0",obs_model2_full$Tendency=="1",obs_model2_full$DS_binary=="1",obs_model2_full$FM_binary=="1"))
+hat2_full = X2_full %*% solve(t(X2_full) %*% X2_full) %*% t(X2_full)
+leverage2_full = diag(hat2_full)
+names(leverage2_full) = seq(1,length(n_bo2[[2]]),by=1)
+
+leverage_full = list('1'=rep(1,length(n_bo2[[1]])),'2'=leverage2_full)
+
+bo.full_cooksd = cooksd.bo(bo.full,bo.full_resP,leverage_full,n_bo2)
+# model 2: nsp1 vs. nsp3
+plot(names(leverage2_full), bo.full_cooksd[[2]], xlab="Index", ylab = "Cook's distance",type="h")
+points(names(leverage2_full), bo.full_cooksd[[2]], pch=16, cex=0.6)
+abline(h=1,col=2,lwd=2,lty=2)
+```
+
+```{r}
+# stepwise model selection
+#BIC
+stepAIC(bo.full, scope = list(lower = bo.null,upper = bo.full),trace = FALSE,k=log(n))
+bo.bic= multinom(formula = NSP ~ LB + AC + UC + DL + DP + ASTV + ALTV + 
+    DS_binary, data = ctg.new.nlz2, Hess = TRUE)
+bo.bic_coeff = coef(bo.bic)
+write.csv(bo.bic_coeff,"bo.bic_coeff.csv")
+# z values
+zval.bo.bic <- coef(bo.bic) / summary(bo.bic)$standard.errors
+# two-sided p-values
+pval.bo.bic <- 2 * pnorm(abs(zval.bo.bic), lower.tail=FALSE)
+
+# proportion of agreement with true class
+bo.bic_prd_labl = predict(bo.bic)
+bo.bic_compare = data.frame(bo.bic_prd_labl, ctg.new.nlz2$NSP)
+bo.bic_pa = length(which(bo.bic_compare$bo.bic_prd_labl==bo.full_compare$ctg.new.nlz2.NSP))/n
+# pearson residuals
+bo.bic_prd_prob = fitted(bo.bic)
+bo.bic_resP = bo.resP(bo.bic,obslabel2)
+
+bo.bic.resplot_fitted  = list() 
+bo.bic.resplot_fitted <- sapply(2:ncol(obslabel2), function(m) {
+  fit_m <- bo.bic_prd_prob[rowSums(obslabel2[,c(1,m)]) > 0,c(1,m)]
+  fit_m <- fit_m[,2] / rowSums(fit_m)
+  bo.bic.resplot_fitted<-fit_m
+})
+# Pearson's chi-square
+bo.bic_chiP = sapply(1:2,function(m){
+  chiP = sum((bo.bic_resP[[m]])^2)
+  pchisq(chiP,n_adj-dim(coef(bo.bic))[2],lower.tail = FALSE)
+})     
+# residual plots
+par(mfrow = c(1,2))
+plot(bo.bic.resplot_fitted[[1]], bo.bic_resP[[1]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.bic.resplot_fitted[[1]], bo.bic_resP[[1]], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(bo.bic.resplot_fitted[[2]], bo.bic_resP[[2]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.bic.resplot_fitted[[2]], bo.bic_resP[[2]], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+par(mfrow = c(1,1))
+```
+
+
+```{r}
+# explore quadratic terms 
+bo.bic_quad = multinom(formula = NSP ~ LB + AC + UC + DL + DP + ASTV + ALTV + 
+    DS_binary+I(LB^2) + I(AC^2) + I(UC^2) + I(DL^2) + I(DP^2) + I(ASTV^2) + I(ALTV^2), data = ctg.new.nlz2, Hess = TRUE,maxit=1000)
+bo.bic_quad_coeff = coef(bo.bic_quad)
+write.csv(bo.bic_quad_coeff,"bo.bic_quad_coeff.csv")
+# z values
+zval.bo.bic_quad <- coef(bo.bic_quad) / summary(bo.bic_quad)$standard.errors
+# two-sided p-values
+pval.bo.bic_quad <- 2 * pnorm(abs(zval.bo.bic_quad), lower.tail=FALSE)
+# proportion of agreement with true class
+bo.bic_quad_prd_labl = predict(bo.bic_quad)
+bo.bic_quad_compare = data.frame(bo.bic_quad_prd_labl, ctg.new.nlz2$NSP)
+bo.bic_quad_pa = length(which(bo.bic_quad_compare$bo.bic_quad_prd_labl==bo.bic_quad_compare$ctg.new.nlz2.NSP))/n
+# pearson residuals
+bo.bic_quad_prd_prob = fitted(bo.bic_quad)
+bo.bic_quad_resP = bo.resP(bo.bic_quad,obslabel2)
+
+bo.bic_quad.resplot_fitted  = list() 
+bo.bic_quad.resplot_fitted  <- sapply(2:ncol(obslabel2), function(m) {
+  fit_m <- bo.bic_quad_prd_prob[rowSums(obslabel2[,c(1,m)]) > 0,c(1,m)]
+  fit_m <- fit_m[,2] / rowSums(fit_m)
+  bo.bic_quad.resplot_fitted<-fit_m
+})
+# Pearson's chi-square
+bo.bic_quad_chiP = sapply(1:2,function(m){
+  chiP = sum((bo.bic_quad_resP[[m]])^2)
+  pchisq(chiP,n_adj-dim(coef(bo.bic_quad))[2],lower.tail = FALSE)
+})     
+# residual plots
+par(mfrow = c(1,2))
+plot(bo.bic_quad.resplot_fitted[[1]], bo.bic_quad_resP[[1]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.bic_quad.resplot_fitted[[1]], bo.bic_quad_resP[[1]], spar=2.2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(bo.bic_quad.resplot_fitted[[2]], bo.bic_quad_resP[[2]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bo.bic_quad.resplot_fitted[[2]], bo.bic_quad_resP[[2]], spar=2.3), col=2)
+abline(h=0, lty=2, col='grey')
+# runs test
+runs.test(y =  bo.bic_quad_resP[[1]], plot.it = FALSE, alternative = "two.sided")
+
+runs.test(y =  bo.bic_quad_resP[[2]], plot.it = FALSE, alternative = "two.sided")
+
+# quadratic terms and two-way interaction terms
+bic_int = multinom(formula = NSP ~ (LB + AC + UC + DL + DP + ASTV + ALTV + 
+    DS_binary)^2+I(LB^2) + I(AC^2) + I(UC^2) + I(DL^2) + I(DP^2) + I(ASTV^2) + I(ALTV^2), data = ctg.new.nlz2, Hess = TRUE,maxit=2000)
+
+stepAIC(bo.null, scope = list(lower = bo.null,upper =bic_int),trace = FALSE,k=log(n))
+bic_int_bic = multinom(formula = NSP ~ I(ASTV^2) + DP + I(AC^2) + LB + UC + 
+    I(DL^2) + I(ALTV^2) + ALTV + DL + I(LB^2) + LB:UC + DP:DL + 
+    DP:ALTV + UC:DL + AC + ASTV, data = ctg.new.nlz2, Hess = TRUE)
+# proportion of agreement
+bic_int_bic_prd_labl = predict(bic_int_bic)
+bic_int_bic_compare = data.frame(bic_int_bic_prd_labl, ctg.new.nlz2$NSP)
+bic_int_bic_pa = length(which(bic_int_bic_compare$bic_int_bic_prd_labl==bic_int_bic_compare$ctg.new.nlz2.NSP))/n
+# pearson residuals
+bic_int_bic_prd_prob = fitted(bic_int_bic)
+bic_int_bic_resP = bo.resP(bic_int_bic,obslabel2)
+
+bic_int_bic.resplot_fitted  = list() 
+bic_int_bic.resplot_fitted  <- sapply(2:ncol(obslabel2), function(m) {
+  fit_m <- bic_int_bic_prd_prob[rowSums(obslabel2[,c(1,m)]) > 0,c(1,m)]
+  fit_m <- fit_m[,2] / rowSums(fit_m)
+  bic_int_bic.resplot_fitted<-fit_m
+})
+# Pearson's chi-square
+bic_int_bic_chiP = sapply(1:2,function(m){
+  chiP = sum((bic_int_bic_resP[[m]])^2)
+  pchisq(chiP,n_adj-dim(coef(bic_int_bic))[2],lower.tail = FALSE)
+})     
+# residual plots
+par(mfrow = c(1,2))
+plot(bic_int_bic.resplot_fitted[[1]], bic_int_bic_resP[[1]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bic_int_bic.resplot_fitted[[1]], bic_int_bic_resP[[1]], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+
+plot(bic_int_bic.resplot_fitted[[2]], bic_int_bic_resP[[2]], pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(bic_int_bic.resplot_fitted[[2]], bic_int_bic_resP[[2]], spar=2), col=2)
+abline(h=0, lty=2, col='grey')
+
+```
+
